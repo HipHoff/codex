@@ -226,11 +226,16 @@ impl App {
     /// intentionally hidden until there is more than one known thread so single-thread sessions do
     /// not spend footer space restating that the user is already on the main conversation.
     pub(super) fn sync_active_agent_label(&mut self) {
+        self.sync_agent_footer_label();
+        self.sync_side_thread_ui();
+    }
+
+    /// Refreshes cached identity/liveness text without changing side-conversation UI state.
+    pub(super) fn sync_agent_footer_label(&mut self) {
         let label = self
             .agent_navigation
             .active_agent_label(self.current_displayed_thread_id(), self.primary_thread_id);
         self.chat_widget.set_active_agent_label(label);
-        self.sync_side_thread_ui();
     }
 
     pub(super) async fn thread_cwd(&self, thread_id: ThreadId) -> Option<AbsolutePathBuf> {
@@ -1135,6 +1140,11 @@ impl App {
             self.mark_agent_picker_thread_closed(thread_id);
         } else if turn_stopped {
             self.agent_navigation.mark_stopped(thread_id);
+        }
+        if is_turn_started || is_thread_closed || turn_stopped {
+            // The label setter requests a frame only when the text changes, including when the
+            // foreground thread is idle and no spinner would otherwise drive a redraw.
+            self.sync_agent_footer_label();
         }
 
         // Settings snapshots do not belong in the transcript queue: apply them in receive order.

@@ -430,6 +430,9 @@ impl App {
         tui: &mut tui::Tui,
         size: ratatui::layout::Size,
     ) -> Result<()> {
+        // Liveness notifications for background threads must update the footer
+        // without requiring the user to reopen `/subagents`.
+        self.sync_agent_footer_label();
         self.flush_native_history(tui);
         if tui.is_owned_screen() {
             let width = self.transcript_reflow.note_width(size.width);

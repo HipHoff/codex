@@ -2429,6 +2429,53 @@ async fn open_agent_picker_preserves_cached_metadata_for_replay_threads() -> Res
 }
 
 #[tokio::test]
+async fn live_agent_footer_refreshes_after_background_notifications_without_opening_picker()
+-> Result<()> {
+    let (mut app, _rx, _op_rx) = make_test_app_with_channels().await;
+    let main = ThreadId::new();
+    let child = ThreadId::new();
+    app.primary_thread_id = Some(main);
+    app.active_thread_id = Some(main);
+    app.agent_navigation.upsert(main, None, None, false);
+    app.agent_navigation.upsert(child, None, None, false);
+    app.agent_navigation
+        .set_agent_path(child, Some("/root/scan".into()));
+    app.ensure_thread_channel(child);
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    let screen_size = tui.terminal.last_known_screen_size;
+
+    app.enqueue_thread_notification(child, turn_started_notification(child, "turn-1"))
+        .await?;
+    // Background notifications update cached footer text even before the next frame.
+    assert!(render_bottom_popup(&app.chat_widget, 80).contains("agents 1/1 running: scan"));
+    app.render_chat_widget_frame(&mut tui, screen_size)?;
+    assert!(render_bottom_popup(&app.chat_widget, 80).contains("agents 1/1 running: scan"));
+
+    // A stale completion must not clear a newer active turn.
+    app.enqueue_thread_notification(
+        child,
+        turn_completed_notification(child, "older", TurnStatus::Completed),
+    )
+    .await?;
+    app.render_chat_widget_frame(&mut tui, screen_size)?;
+    assert!(render_bottom_popup(&app.chat_widget, 80).contains("agents 1/1 running: scan"));
+
+    app.enqueue_thread_notification(
+        child,
+        turn_completed_notification(child, "turn-1", TurnStatus::Completed),
+    )
+    .await?;
+    app.render_chat_widget_frame(&mut tui, screen_size)?;
+    assert!(render_bottom_popup(&app.chat_widget, 80).contains("agents 0/1 running"));
+
+    app.enqueue_thread_notification(child, turn_started_notification(child, "turn-2"))
+        .await?;
+    app.render_chat_widget_frame(&mut tui, screen_size)?;
+    assert!(render_bottom_popup(&app.chat_widget, 80).contains("agents 1/1 running: scan"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn open_agent_picker_preserves_running_hints_until_observed_completion() -> Result<()> {
     let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
     let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(
