@@ -24,6 +24,7 @@ use crate::multi_agents::SubAgentActivityDisplay;
 use crate::multi_agents::format_agent_picker_item_name;
 use crate::multi_agents::next_agent_shortcut;
 use crate::multi_agents::previous_agent_shortcut;
+use crate::text_formatting::truncate_text;
 use codex_protocol::ThreadId;
 use ratatui::text::Span;
 use std::collections::HashMap;
@@ -408,30 +409,74 @@ impl AgentNavigationState {
 
         let thread_id = current_displayed_thread_id?;
         let is_primary = primary_thread_id == Some(thread_id);
-        Some(
-            self.threads
-                .get(&thread_id)
-                .map(|entry| {
-                    if !is_primary
-                        && let Some(agent_path) = entry
-                            .agent_path
-                            .as_deref()
-                            .filter(|agent_path| !agent_path.trim().is_empty())
-                    {
-                        return format!("`{agent_path}`");
-                    }
-                    format_agent_picker_item_name(
-                        entry.agent_nickname.as_deref(),
-                        entry.agent_role.as_deref(),
-                        is_primary,
-                    )
+        let current = self
+            .threads
+            .get(&thread_id)
+            .map(|entry| {
+                if !is_primary
+                    && let Some(agent_path) = entry
+                        .agent_path
+                        .as_deref()
+                        .filter(|agent_path| !agent_path.trim().is_empty())
+                {
+                    return format!("`{agent_path}`");
+                }
+                format_agent_picker_item_name(
+                    entry.agent_nickname.as_deref(),
+                    entry.agent_role.as_deref(),
+                    is_primary,
+                )
+            })
+            .unwrap_or_else(|| {
+                format_agent_picker_item_name(
+                    /*agent_nickname*/ None, /*agent_role*/ None, is_primary,
+                )
+            });
+        match self.running_agents_label(primary_thread_id) {
+            Some(agents) => Some(format!("{agents} · {current}")),
+            None => Some(current),
+        }
+    }
+
+    /// A bounded live view of the same path-backed descendants as `/subagents`.
+    /// Only cached identity/liveness metadata is used; no activity or transcript reads.
+    pub(crate) fn running_agents_label(
+        &self,
+        primary_thread_id: Option<ThreadId>,
+    ) -> Option<String> {
+        let agents = self.ordered_path_backed_subagent_threads(primary_thread_id);
+        if agents.is_empty() {
+            return None;
+        }
+        let running: Vec<_> = agents
+            .iter()
+            .filter(|(_, entry)| entry.is_running && !entry.is_closed)
+            .collect();
+        let mut label = format!("agents {}/{} running", running.len(), agents.len());
+        if !running.is_empty() {
+            let names = running
+                .iter()
+                .take(3)
+                .map(|(_, entry)| {
+                    let path = entry.agent_path.as_deref().unwrap_or_default();
+                    let name: String = path
+                        .trim()
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or_default()
+                        .chars()
+                        .filter(|c| !c.is_control())
+                        .collect();
+                    truncate_text(&name, 24)
                 })
-                .unwrap_or_else(|| {
-                    format_agent_picker_item_name(
-                        /*agent_nickname*/ None, /*agent_role*/ None, is_primary,
-                    )
-                }),
-        )
+                .collect::<Vec<_>>()
+                .join(", ");
+            label.push_str(&format!(": {names}"));
+            if running.len() > 3 {
+                label.push_str(&format!(" +{}", running.len() - 3));
+            }
+        }
+        Some(label)
     }
 
     /// Builds the `/subagents` picker subtitle from the same canonical bindings used by key handling.
@@ -603,6 +648,91 @@ mod tests {
         assert_eq!(
             state.active_agent_label(Some(main_thread_id), Some(main_thread_id)),
             Some("Main [default]".to_string())
+        );
+    }
+
+    #[test]
+    fn live_agent_footer_tracks_lifecycle_and_visibility() {
+        let (mut state, main, first, second) = populated_state();
+        assert_eq!(state.running_agents_label(Some(main)), None);
+        state.set_agent_path(first, Some("/root/scan".into()));
+        state.set_agent_path(second, Some("/root/review".into()));
+        state.mark_running(first);
+        state.mark_running(second);
+        assert_eq!(
+            state.running_agents_label(Some(main)),
+            Some("agents 2/2 running: scan, review".into())
+        );
+        state.mark_stopped(first);
+        assert_eq!(
+            state.running_agents_label(Some(main)),
+            Some("agents 1/2 running: review".into())
+        );
+        state.mark_running(first);
+        state.mark_closed(second);
+        assert_eq!(
+            state.running_agents_label(Some(main)),
+            Some("agents 1/2 running: scan".into())
+        );
+        state.mark_stopped(first);
+        assert_eq!(
+            state.running_agents_label(Some(main)),
+            Some("agents 0/2 running".into())
+        );
+        state.upsert(second, None, None, false);
+        state.mark_running(second);
+        assert_eq!(
+            state.running_agents_label(Some(main)),
+            Some("agents 1/2 running: review".into())
+        );
+        state.clear();
+        assert_eq!(state.running_agents_label(Some(main)), None);
+    }
+    #[test]
+    fn live_agent_footer_excludes_main_hidden_and_unpathed_threads() {
+        let (mut state, main, first, second) = populated_state();
+        state.set_agent_path(main, Some("/root".into()));
+        state.mark_running(main);
+        state.mark_running(first);
+        state.set_agent_path(second, Some("/root/review".into()));
+        state.mark_running(second);
+        state.set_picker_thread_visibility(second, AgentPickerThreadVisibility::Hidden);
+        assert_eq!(state.running_agents_label(Some(main)), None);
+        state.set_picker_thread_visibility(second, AgentPickerThreadVisibility::Visible);
+        assert_eq!(
+            state.running_agents_label(Some(main)),
+            Some("agents 1/1 running: review".into())
+        );
+        state.remove(second);
+        assert_eq!(state.running_agents_label(Some(main)), None);
+    }
+
+    #[test]
+    fn live_agent_footer_bounds_names_and_preserves_spawn_order() {
+        let (mut state, main, first, second) = populated_state();
+        state.set_agent_path(first, Some(format!("/root/{}", "界".repeat(40))));
+        state.set_agent_path(second, Some("/root/second\n\u{1b}".into()));
+        state.mark_running(second);
+        state.mark_running(first);
+        for id in 104..107 {
+            let thread =
+                ThreadId::from_string(&format!("00000000-0000-0000-0000-{id:012}")).unwrap();
+            state.upsert(thread, None, None, false);
+            state.set_agent_path(thread, Some(format!("/root/worker{id}")));
+            state.mark_running(thread);
+        }
+        let expected_name = format!("{}...", "界".repeat(21));
+        assert_eq!(
+            state.running_agents_label(Some(main)),
+            Some(format!(
+                "agents 5/5 running: {expected_name}, second, worker104 +2"
+            ))
+        );
+        assert_eq!(
+            state.active_agent_label(Some(main), Some(main)),
+            Some(format!(
+                "agents 5/5 running: {expected_name}, second, worker104 +2 · Main [default]"
+            ))
         );
     }
 }

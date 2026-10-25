@@ -831,20 +831,19 @@ pub(crate) fn passive_footer_status_line(props: &FooterProps) -> Option<Line<'st
         return None;
     }
 
-    let mut line = if props.status_line_enabled {
-        props.status_line_value.clone()
-    } else {
-        None
-    };
-
-    if let Some(active_agent_label) = props.active_agent_label.as_ref() {
+    // Keep the live agent summary visible when configured status items fill a narrow terminal.
+    let mut line = props
+        .active_agent_label
+        .as_ref()
+        .map(|label| Line::from(label.clone()).set_style(secondary_text_style()));
+    if props.status_line_enabled
+        && let Some(status) = props.status_line_value.clone()
+    {
         if let Some(existing) = line.as_mut() {
-            existing.spans.push(" · ".set_style(secondary_text_style()));
-            existing
-                .spans
-                .push(active_agent_label.clone().set_style(secondary_text_style()));
+            existing.push_span(" · ".set_style(secondary_text_style()));
+            existing.extend(status.spans);
         } else {
-            line = Some(Line::from(active_agent_label.clone()).set_style(secondary_text_style()));
+            line = Some(status);
         }
     }
 
@@ -1691,6 +1690,33 @@ mod tests {
         };
 
         snapshot_footer("footer_status_line_with_active_agent_label", props);
+    }
+
+    #[test]
+    fn live_agents_remain_visible_in_narrow_terminal_with_status_items() {
+        let props = FooterProps {
+            mode: FooterMode::ComposerEmpty,
+            esc_backtrack_hint: false,
+            is_task_running: true,
+            queue_submissions: false,
+            collaboration_modes_enabled: false,
+            is_wsl: false,
+            quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
+            status_line_value: Some(Line::from(
+                "model · branch · context · long configured status",
+            )),
+            status_line_enabled: true,
+            key_hints: FooterKeyHints::default_bindings(),
+            active_agent_label: Some("agents 2/3 running: scan, review · Main [default]".into()),
+        };
+        let rendered =
+            render_footer_with_mode_indicator_and_context(40, &props, None, Line::default());
+        assert!(
+            rendered.contains("agents 2/3 running: scan, review"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("long configured status"), "{rendered}");
+        snapshot_footer_with_mode_indicator("footer_live_agents_narrow", 40, &props, None);
     }
 
     #[test]
